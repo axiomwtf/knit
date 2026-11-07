@@ -1,7 +1,7 @@
 //! Yarnball state: objects, strands, head, stat cache.
 
 use crate::format::{self, KIND_HEAD, KIND_HUB, KIND_INDEX, KIND_JOIN, KIND_KNOT, KIND_MARK, KIND_REF, KIND_STASH, KIND_STASH_DROP, KIND_TREE};
-use crate::object::{self, CacheEntry, JoinState, Knot, ObjectId, StashEntry, Tree};
+use crate::object::{self, CacheEntry, JoinState, Knot, ObjectId, StashEntry, Tree, TreeEntry};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -36,6 +36,8 @@ pub struct Yarnball {
     pub stashes: Vec<StashEntry>,
     /// hub name -> url (empty url removes)
     pub hubs: BTreeMap<String, String>,
+    /// resolved-tree memo for delta chains
+    tree_memo: std::cell::RefCell<BTreeMap<ObjectId, Tree>>,
 }
 
 impl Yarnball {
@@ -74,7 +76,11 @@ impl Yarnball {
                     head = object::decode_head(&f.payload)?;
                 }
                 KIND_INDEX => {
-                    cache = object::decode_index(&f.payload)?;
+                    if object::is_index_delta(&f.payload) {
+                        object::apply_index_delta(&f.payload, &mut cache)?;
+                    } else {
+                        cache = object::decode_index(&f.payload)?;
+                    }
                 }
                 format::KIND_KEY => {
                     if f.payload.len() == 32 {
@@ -117,7 +123,7 @@ impl Yarnball {
         }
 
         stashes.retain(|s| !stash_drops.contains(&s.stash_id()));
-        Ok(Self { path: path.to_path_buf(), objects, strands, head, cache, knots, pubkeys, join, marks, stashes, hubs })
+        Ok(Self { path: path.to_path_buf(), objects, strands, head, cache, knots, pubkeys, join, marks, stashes, hubs, tree_memo: std::cell::RefCell::new(BTreeMap::new()) })
     }
 
     /// Create a new yarnball: `.knit` file with HEAD=main.
@@ -160,9 +166,45 @@ impl Yarnball {
         self.object_bytes(id)
     }
 
+    /// Resolve a tree object. The payload may be a full tree or a delta
+    /// chain ("same parts": only changed entries are stored).
     pub fn tree(&self, tree_id: &ObjectId) -> Result<Tree> {
-        let payload = self.object_bytes(tree_id).context("tree object missing")?;
-        object::decode_tree(&payload)
+        if let Some(t) = self.tree_memo.borrow().get(tree_id) {
+            return Ok(t.clone());
+        }
+        // Walk the delta chain down to a full tree, then apply deltas
+        // oldest-first. Every id on the chain resolves to its own tree,
+        // so all of them can be memoized.
+        let mut chain: Vec<(ObjectId, Vec<u8>)> = Vec::new();
+        let mut cur = *tree_id;
+        let full_payload;
+        loop {
+            let payload = self.object_bytes(&cur).context("tree object missing")?;
+            match object::tree_delta_base(&payload) {
+                Some(base) => {
+                    chain.push((cur, payload));
+                    cur = base;
+                }
+                None => {
+                    full_payload = payload;
+                    break;
+                }
+            }
+        }
+        let mut tree = object::decode_tree(&full_payload)?;
+        let mut memo = self.tree_memo.borrow_mut();
+        for (id, payload) in chain.iter().rev() {
+            let (_, changes) = object::decode_tree_delta(payload)?;
+            for (path, mode, blob_id) in changes {
+                if mode == 0 {
+                    tree.remove(&path);
+                } else {
+                    tree.insert(path.clone(), TreeEntry { path, mode, blob_id });
+                }
+            }
+            memo.insert(*id, tree.clone());
+        }
+        Ok(tree)
     }
 
     pub fn knot(&self, knot_id: &ObjectId) -> Result<Knot> {

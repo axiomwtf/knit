@@ -103,6 +103,85 @@ pub fn decode_tree(payload: &[u8]) -> Result<Tree> {
     Ok(tree)
 }
 
+// ---------- tree deltas ("same parts") ----------
+//
+// A TREE payload may be a delta: only the entries that differ from a base
+// tree are stored. The base is another tree object id, which may itself be
+// a delta, so chains resolve recursively. The first u32 is TREE_DELTA
+// (0xFFFFFFFF), a value no real entry count can have.
+
+pub const TREE_DELTA: u32 = 0xFFFF_FFFF;
+
+/// One changed path: mode 0 means deleted.
+pub type TreeDelta = Vec<(String, u32, ObjectId)>;
+
+/// If `payload` is a delta, return its base tree id.
+pub fn tree_delta_base(payload: &[u8]) -> Option<ObjectId> {
+    if payload.len() >= 36 && u32::from_le_bytes(payload[..4].try_into().unwrap()) == TREE_DELTA {
+        Some(ObjectId::try_from(&payload[4..36]).unwrap())
+    } else {
+        None
+    }
+}
+
+/// Encode `new` as a delta against `base` (resolved trees). Returns the
+/// payload only if it is smaller than the full encoding.
+pub fn encode_tree_delta(base_id: &ObjectId, base: &Tree, new: &Tree) -> Option<Vec<u8>> {
+    // path -> new entry, or None for deletion. BTreeMap keeps canonical order.
+    let mut changes: BTreeMap<&str, Option<&TreeEntry>> = BTreeMap::new();
+    for (p, e) in new {
+        if base.get(p) != Some(e) {
+            changes.insert(p, Some(e));
+        }
+    }
+    for p in base.keys() {
+        if !new.contains_key(p) {
+            changes.insert(p.as_str(), None);
+        }
+    }
+    if changes.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    put_u32(&mut out, TREE_DELTA);
+    put_id(&mut out, base_id);
+    put_u32(&mut out, changes.len() as u32);
+    for (path, entry) in changes {
+        put_str(&mut out, path);
+        match entry {
+            Some(e) => {
+                put_u32(&mut out, e.mode);
+                put_id(&mut out, &e.blob_id);
+            }
+            None => put_u32(&mut out, 0),
+        }
+    }
+    if out.len() >= encode_tree(new).len() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Decode a delta payload into (base_id, changes).
+pub fn decode_tree_delta(payload: &[u8]) -> Result<(ObjectId, TreeDelta)> {
+    let mut r = Reader { buf: payload, pos: 0 };
+    let marker = r.u32()?;
+    if marker != TREE_DELTA {
+        bail!("not a tree delta");
+    }
+    let base_id = r.id()?;
+    let n = r.u32()?;
+    let mut changes = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let path = r.string()?;
+        let mode = r.u32()?;
+        let blob_id = if mode == 0 { ObjectId::default() } else { r.id()? };
+        changes.push((path, mode, blob_id));
+    }
+    r.done()?;
+    Ok((base_id, changes))
+}
+
 // ---------- knot ----------
 
 #[derive(Debug, Clone)]
@@ -213,7 +292,7 @@ pub fn decode_head(payload: &[u8]) -> Result<String> {
 
 // ---------- index (stat cache) ----------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheEntry {
     pub mtime_secs: u64,
     pub mtime_nanos: u32,
@@ -253,6 +332,90 @@ pub fn decode_index(payload: &[u8]) -> Result<BTreeMap<String, CacheEntry>> {
     }
     r.done()?;
     Ok(map)
+}
+
+// ---------- index deltas ("same parts") ----------
+//
+// An INDEX payload may be a delta against the cache state left by the
+// previous INDEX record: only entries that changed are stored. The first
+// u32 is INDEX_DELTA (0xFFFFFFFE), applied by the loader in frame order.
+
+pub const INDEX_DELTA: u32 = 0xFFFF_FFFE;
+
+/// (path, entry or None for removal), canonical order.
+pub type IndexDelta = Vec<(String, Option<CacheEntry>)>;
+
+pub fn is_index_delta(payload: &[u8]) -> bool {
+    payload.len() >= 4 && u32::from_le_bytes(payload[..4].try_into().unwrap()) == INDEX_DELTA
+}
+
+/// Encode `new` as a delta against `prev`. Returns the payload only if it
+/// is smaller than the full encoding.
+pub fn encode_index_delta(prev: &BTreeMap<String, CacheEntry>, new: &BTreeMap<String, CacheEntry>) -> Option<Vec<u8>> {
+    let mut changes: BTreeMap<&str, Option<&CacheEntry>> = BTreeMap::new();
+    for (p, e) in new {
+        if prev.get(p) != Some(e) {
+            changes.insert(p, Some(e));
+        }
+    }
+    for p in prev.keys() {
+        if !new.contains_key(p) {
+            changes.insert(p.as_str(), None);
+        }
+    }
+    // An empty change set still encodes (marker + count 0): tiny, and keeps
+    // the "one INDEX record per mutation" invariant.
+    let mut out = Vec::new();
+    put_u32(&mut out, INDEX_DELTA);
+    put_u32(&mut out, changes.len() as u32);
+    for (path, entry) in changes {
+        put_str(&mut out, path);
+        match entry {
+            Some(e) => {
+                out.push(1);
+                put_u64(&mut out, e.mtime_secs);
+                put_u32(&mut out, e.mtime_nanos);
+                put_u64(&mut out, e.size);
+                put_u32(&mut out, e.mode);
+                put_id(&mut out, &e.blob_id);
+            }
+            None => out.push(0),
+        }
+    }
+    if out.len() >= encode_index(new).len() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Apply a delta payload onto `cache` in place.
+pub fn apply_index_delta(payload: &[u8], cache: &mut BTreeMap<String, CacheEntry>) -> Result<()> {
+    let mut r = Reader { buf: payload, pos: 0 };
+    let marker = r.u32()?;
+    if marker != INDEX_DELTA {
+        bail!("not an index delta");
+    }
+    let n = r.u32()?;
+    for _ in 0..n {
+        let path = r.string()?;
+        match r.take(1)?[0] {
+            0 => {
+                cache.remove(&path);
+            }
+            _ => {
+                let e = CacheEntry {
+                    mtime_secs: r.u64()?,
+                    mtime_nanos: r.u32()?,
+                    size: r.u64()?,
+                    mode: r.u32()?,
+                    blob_id: r.id()?,
+                };
+                cache.insert(path, e);
+            }
+        }
+    }
+    r.done()?;
+    Ok(())
 }
 
 // ---------- join (pending merge state) ----------

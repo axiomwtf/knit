@@ -393,8 +393,6 @@ fn tie(args: TieArgs) -> Result<()> {
 
     let mut y = Yarnball::open(&ball)?;
     let (tree, new_cache, blobs) = worktree::scan(&root, &y.cache)?;
-    let tree_payload = object::encode_tree(&tree);
-    let tree_id = object::object_id(&tree_payload);
 
     let head_knot = y.head_knot()?;
     let mut parents: Vec<ObjectId> = head_knot.into_iter().collect();
@@ -410,6 +408,9 @@ fn tie(args: TieArgs) -> Result<()> {
             });
         }
     }
+
+    let base = base_tree(&y, &parents)?;
+    let (tree_id, tree_record) = plan_tree(&y, &tree, base)?;
 
     let ks = KeyStorage::new()?;
     let kp = ks.load_keypair()?;
@@ -437,8 +438,8 @@ fn tie(args: TieArgs) -> Result<()> {
             records.push((format::KIND_BLOB, content.clone()));
         }
     }
-    if !y.has_object(&tree_id) {
-        records.push((KIND_TREE, tree_payload));
+    if let Some(payload) = tree_record {
+        records.push((KIND_TREE, payload));
     }
     let pubkey = kp.public_key_bytes();
     if !y.pubkeys.contains(&pubkey) {
@@ -449,7 +450,7 @@ fn tie(args: TieArgs) -> Result<()> {
         records.push((format::KIND_JOIN, object::encode_join(j)));
     }
     records.push((KIND_REF, object::encode_ref(&head, &knot_id)));
-    records.push((KIND_INDEX, object::encode_index(&new_cache)));
+    records.push((KIND_INDEX, index_payload(&y.cache, &new_cache)));
 
     y.mutate(|f| format::append_records(f, &records))?;
     println!("knot {} {}", object::short_id(&knot_id), diff::hide_footer(&knot.message).lines().next().unwrap_or(""));
@@ -684,10 +685,58 @@ fn knot_tree(y: &Yarnball, knot_id: &ObjectId) -> Result<Tree> {
     y.tree(&k.tree_id)
 }
 
+/// Choose how to store `tree`: identical to base reuses the base id (zero
+/// bytes), otherwise the smaller of full vs delta encoding. Returns the
+/// object id and an optional TREE record payload to append.
+fn plan_tree(
+    y: &Yarnball,
+    tree: &Tree,
+    base: Option<(ObjectId, Tree)>,
+) -> Result<(ObjectId, Option<Vec<u8>>)> {
+    if let Some((base_id, base_tree)) = &base {
+        if base_tree == tree {
+            return Ok((*base_id, None));
+        }
+    }
+    let full = object::encode_tree(tree);
+    let full_id = object::object_id(&full);
+    if let Some((base_id, base_tree)) = &base {
+        if let Some(delta) = object::encode_tree_delta(base_id, base_tree, tree) {
+            let delta_id = object::object_id(&delta);
+            if !y.has_object(&delta_id) {
+                return Ok((delta_id, Some(delta)));
+            }
+            return Ok((delta_id, None));
+        }
+    }
+    if !y.has_object(&full_id) {
+        Ok((full_id, Some(full)))
+    } else {
+        Ok((full_id, None))
+    }
+}
+
+/// The tree of the first parent knot, for delta encoding.
+fn base_tree(y: &Yarnball, parents: &[ObjectId]) -> Result<Option<(ObjectId, Tree)>> {
+    let Some(p) = parents.first() else { return Ok(None) };
+    let knot = y.knot(p)?;
+    Ok(Some((knot.tree_id, y.tree(&knot.tree_id)?)))
+}
+
+/// INDEX payload: delta against the previous cache when smaller.
+fn index_payload(prev: &std::collections::BTreeMap<String, object::CacheEntry>, new: &std::collections::BTreeMap<String, object::CacheEntry>) -> Vec<u8> {
+    let full = object::encode_index(new);
+    match object::encode_index_delta(prev, new) {
+        Some(d) if d.len() < full.len() => d,
+        _ => full,
+    }
+}
+
 fn store_tree(y: &mut Yarnball, tree: &Tree) -> Result<ObjectId> {
-    let payload = object::encode_tree(tree);
-    let id = object::object_id(&payload);
-    if !y.has_object(&id) {
+    let parents = y.head_knot()?.into_iter().collect::<Vec<_>>();
+    let base = base_tree(y, &parents)?;
+    let (id, record) = plan_tree(y, tree, base)?;
+    if let Some(payload) = record {
         y.mutate(|f| format::append_records(f, &[(KIND_TREE, payload)]))?;
     }
     Ok(id)
@@ -730,7 +779,8 @@ fn sign_and_commit(
     // Refresh the stat cache from the materialized worktree.
     let (_, new_cache, blobs) = worktree::scan(root, &BTreeMap::new())?;
     persist_blobs(y, &blobs)?;
-    y.mutate(|f| format::append_records(f, &[(KIND_INDEX, object::encode_index(&new_cache))]))?;
+    let ip = index_payload(&y.cache, &new_cache);
+    y.mutate(|f| format::append_records(f, &[(KIND_INDEX, ip)]))?;
     Ok(knot_id)
 }
 
@@ -923,7 +973,8 @@ fn stash(cmd: Option<&StashCmd>, message: Option<&str>) -> Result<()> {
             // Refresh cache.
             let (_, cache, blobs) = worktree::scan(&repo.wt, &std::collections::BTreeMap::new())?;
             persist_blobs(&mut y, &blobs)?;
-            y.mutate(|f| format::append_records(f, &[(KIND_INDEX, object::encode_index(&cache))]))?;
+            let ip = index_payload(&y.cache, &cache);
+            y.mutate(|f| format::append_records(f, &[(KIND_INDEX, ip)]))?;
             println!("applied {}", s.label);
             return Ok(());
         }
@@ -956,7 +1007,8 @@ fn stash(cmd: Option<&StashCmd>, message: Option<&str>) -> Result<()> {
     }
     let (_, cache, blobs2) = worktree::scan(&repo.wt, &std::collections::BTreeMap::new())?;
     persist_blobs(&mut y, &blobs2)?;
-    y.mutate(|f| format::append_records(f, &[(KIND_INDEX, object::encode_index(&cache))]))?;
+    let ip = index_payload(&y.cache, &cache);
+    y.mutate(|f| format::append_records(f, &[(KIND_INDEX, ip)]))?;
     println!("stashed: {}", label);
     Ok(())
 }
@@ -1068,11 +1120,27 @@ fn block() -> Result<()> {
         }
     }
 
-    let keep: std::collections::HashSet<ObjectId> =
+    let mut keep: std::collections::HashSet<ObjectId> =
         knot_ids.union(&tree_ids).chain(blob_ids.iter()).copied().collect();
 
     // Rewrite the file under the exclusive lock.
     let frames = format::read_frames(&y.path)?;
+
+    // Delta trees reference base trees; keep the whole chain.
+    loop {
+        let mut added = false;
+        for fr in &frames {
+            if fr.kind == KIND_TREE && keep.contains(&object::object_id(&fr.payload)) {
+                if let Some(b) = object::tree_delta_base(&fr.payload) {
+                    added |= keep.insert(b);
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
     let tmp = y.path.with_extension("knit.tmp");
     {
         use std::io::Write;
@@ -1081,7 +1149,6 @@ fn block() -> Result<()> {
         header[..4].copy_from_slice(format::MAGIC);
         header[4..8].copy_from_slice(&format::VERSION.to_le_bytes());
         f.write_all(&header)?;
-        let mut last_index: Option<&crate::format::Frame> = None;
         for fr in &frames {
             match fr.kind {
                 format::KIND_BLOB | KIND_TREE | KIND_KNOT => {
@@ -1090,15 +1157,14 @@ fn block() -> Result<()> {
                         f.write_all(&format::encode_frame(fr.kind, &fr.payload))?;
                     }
                 }
-                KIND_INDEX => last_index = Some(fr),
+                KIND_INDEX => {}
                 _ => {
                     f.write_all(&format::encode_frame(fr.kind, &fr.payload))?;
                 }
             }
         }
-        if let Some(fr) = last_index {
-            f.write_all(&format::encode_frame(KIND_INDEX, &fr.payload))?;
-        }
+        // INDEX may be a delta; write the resolved cache in full.
+        f.write_all(&format::encode_frame(KIND_INDEX, &object::encode_index(&y.cache)))?;
         f.sync_all()?;
     }
     fs::rename(&tmp, &y.path)?;

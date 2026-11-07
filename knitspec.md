@@ -407,6 +407,20 @@ repeat entry_count times, sorted by name (byte order):
 The tree is a flat map of every file in the snapshot. Nested git trees are
 reconstructed at export time.
 
+A TREE payload may instead be a **delta** ("same parts"): only the entries
+that differ from a base tree are stored. The writer picks the smaller of the
+two encodings, and reuses the base tree id outright when nothing changed.
+
+```
+u32           0xFFFFFFFF       (delta marker; no real entry count can be this)
+obj id        base_tree_id     (may itself be a delta; chains resolve recursively)
+u32           change_count
+repeat change_count times, sorted by path:
+  knit string  path
+  u32          mode            (0 = deleted)
+  obj id       blob_id         (omitted when mode is 0)
+```
+
 ### KNOT payload
 
 ```
@@ -454,6 +468,24 @@ repeat entry_count times, sorted by path:
 
 The cache lets `knit tie` skip re-hashing unchanged files. It is a hint only:
 a cache miss or mismatch always falls back to hashing.
+
+An INDEX payload may also be a **delta** against the cache left by the
+previous INDEX record, storing only changed entries. Deltas apply in frame
+order, so readers resolve them while loading.
+
+```
+u32           0xFFFFFFFE       (delta marker)
+u32           change_count
+repeat change_count times, sorted by path:
+  knit string  path
+  u8           op              (0 = remove, 1 = put)
+  if op == 1:
+    u64        mtime_secs
+    u32        mtime_nanos
+    u64        size
+    u32        mode
+    obj id     blob_id
+```
 
 
 *End of Specification*
