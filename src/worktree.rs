@@ -7,9 +7,9 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-const MODE_FILE: u32 = 0o100644;
-const MODE_EXE: u32 = 0o100755;
-const MODE_LINK: u32 = 0o120000;
+pub const MODE_FILE: u32 = 0o100644;
+pub const MODE_EXE: u32 = 0o100755;
+pub const MODE_LINK: u32 = 0o120000;
 
 fn git_mode(md: &fs::Metadata) -> Option<u32> {
     let ft = md.file_type();

@@ -349,6 +349,9 @@ fn key(cmd: KeyCmd) -> Result<()> {
     let ks = KeyStorage::new()?;
     match cmd {
         KeyCmd::Gen => {
+            if ks.has_keypair() {
+                bail!("keypair already exists at {}; remove it first to regenerate", ks.privkey_path().display());
+            }
             let kp = ks.generate_keypair()?;
             println!("generated Ed25519 keypair");
             println!("  private: {}", ks.privkey_path().display());
@@ -1141,6 +1144,8 @@ enum HubTarget {
     Dir(PathBuf),
     /// SSH endpoint: (user@host, remote knits dir)
     Ssh { dest: String, dir: String },
+    /// GitHub repo "owner/name", driven through `gh api` (no git involved).
+    Github { repo: String },
 }
 
 fn hub_target(repo: &Repo, y: &Yarnball, name: &str) -> Result<(HubTarget, String)> {
@@ -1148,7 +1153,21 @@ fn hub_target(repo: &Repo, y: &Yarnball, name: &str) -> Result<(HubTarget, Strin
     let repo_name = repo.ball.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
-    // url forms: file:///dir | /dir | dir | user@host[:dir]
+    // url forms: github.com/o/r | https://github.com/o/r | gh:o/r |
+    //            file:///dir | /dir | dir | user@host[:dir]
+    let gh_repo = url
+        .strip_prefix("gh:")
+        .map(|s| s.to_string())
+        .or_else(|| url.strip_prefix("https://github.com/").map(|s| s.to_string()))
+        .or_else(|| url.strip_prefix("http://github.com/").map(|s| s.to_string()))
+        .or_else(|| url.strip_prefix("github.com/").map(|s| s.to_string()));
+    if let Some(r) = gh_repo {
+        let r = r.trim_end_matches('/').trim_end_matches(".git").to_string();
+        if r.split('/').count() == 2 {
+            return Ok((HubTarget::Github { repo: r }, repo_name));
+        }
+        bail!("bad github hub url '{url}'; want github.com/owner/repo");
+    }
     if let Some(rest) = url.strip_prefix("file://") {
         return Ok((HubTarget::Dir(PathBuf::from(rest)), repo_name));
     }
@@ -1177,6 +1196,11 @@ fn fetch_remote(target: &HubTarget, name: &str) -> Result<Option<PathBuf>> {
                 return Ok(None);
             }
             fs::copy(&p, &tmp)?;
+        }
+        HubTarget::Github { repo } => {
+            if !github_fetch(repo, &tmp)? {
+                return Ok(None);
+            }
         }
         HubTarget::Ssh { dest, dir } => {
             let remote = remote_path(dir, name);
@@ -1210,6 +1234,14 @@ fn send(hub_name: &str) -> Result<()> {
     let y = Yarnball::open(&repo.ball)?;
     let (target, name) = hub_target(&repo, &y, hub_name)?;
 
+    match &target {
+        HubTarget::Github { repo: gh_repo } => {
+            github_send(&y, gh_repo)?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     // Refuse to clobber a diverged remote.
     if let Some(remote) = fetch_remote(&target, &name)? {
         let remote_ids = file_object_ids(&remote)?;
@@ -1239,6 +1271,7 @@ fn send(hub_name: &str) -> Result<()> {
                 bail!("ssh send failed");
             }
         }
+        HubTarget::Github { .. } => unreachable!(),
     }
     println!("sent {} to {hub_name}", y.path.display());
     Ok(())
@@ -1336,4 +1369,164 @@ fn gather(hub_name: &str, haul: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------- github hub (via `gh api`, never git) ----------
+
+/// Run `gh api <endpoint>` with an optional JSON body file. Returns parsed JSON.
+fn gh_api(endpoint: &str, method: &str, body: Option<&serde_json::Value>) -> Result<serde_json::Value> {
+    let mut cmd = std::process::Command::new("gh");
+    cmd.arg("api").arg(endpoint).arg("-X").arg(method);
+    let tmp;
+    if let Some(b) = body {
+        tmp = std::env::temp_dir().join(format!("knit-gh-{}", std::process::id()));
+        fs::write(&tmp, serde_json::to_string(b)?)?;
+        cmd.arg("--input").arg(&tmp);
+    }
+    let out = cmd.output().context("failed to run `gh`; is it installed and authed?")?;
+    let _ = tmp;
+    if !out.status.success() {
+        bail!("gh api {endpoint} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null))
+}
+
+fn gh_blob(gh_repo: &str, content: &[u8]) -> Result<String> {
+    let v = gh_api(&format!("repos/{gh_repo}/git/blobs"), "POST", Some(&serde_json::json!({
+        "content": base64_encode(content),
+        "encoding": "base64",
+    })))?;
+    Ok(v["sha"].as_str().context("blob response missing sha")?.to_string())
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// Upload a tree level: `files` maps full path -> (git mode, blob sha).
+/// `prefix` is the directory this level represents ("" = root).
+fn gh_tree(gh_repo: &str, files: &BTreeMap<String, (String, String)>, prefix: &str) -> Result<String> {
+    // Group immediate children under prefix.
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut dirs_seen: BTreeMap<String, ()> = BTreeMap::new();
+    for (path, (mode, sha)) in files {
+        let Some(rest) = path.strip_prefix(prefix) else { continue };
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        if rest.is_empty() { continue; }
+        match rest.split_once('/') {
+            None => {
+                entries.push(serde_json::json!({
+                    "path": rest, "mode": mode, "type": "blob", "sha": sha,
+                }));
+            }
+            Some((dir, _)) => {
+                dirs_seen.insert(dir.to_string(), ());
+            }
+        }
+    }
+    for dir in dirs_seen.keys() {
+        let sub_prefix = if prefix.is_empty() { dir.clone() } else { format!("{prefix}/{dir}") };
+        let sub_files: BTreeMap<String, (String, String)> = files
+            .iter()
+            .filter(|(p, _)| p.starts_with(&format!("{sub_prefix}/")))
+            .map(|(p, (m, s))| (p.clone(), (m.clone(), s.clone())))
+            .collect();
+        let tree_sha = gh_tree(gh_repo, &sub_files, &sub_prefix)?;
+        entries.push(serde_json::json!({
+            "path": dir, "mode": "040000", "type": "tree", "sha": tree_sha,
+        }));
+    }
+    entries.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    let v = gh_api(&format!("repos/{gh_repo}/git/trees"), "POST", Some(&serde_json::json!({
+        "tree": entries,
+    })))?;
+    Ok(v["sha"].as_str().context("tree response missing sha")?.to_string())
+}
+
+/// Push the HEAD tree plus the .knit yarnball to a GitHub repo as one commit.
+fn github_send(y: &Yarnball, gh_repo: &str) -> Result<()> {
+    let head_knot = y.head_knot()?.context("no knots yet; tie first")?;
+    let knot = y.knot(&head_knot)?;
+    let tree = y.tree(&knot.tree_id)?;
+
+    // Find current head of the remote default branch.
+    let repo_info = gh_api(&format!("repos/{gh_repo}"), "GET", None)?;
+    let branch = repo_info["default_branch"].as_str().unwrap_or("main").to_string();
+    let head_sha = gh_api(&format!("repos/{gh_repo}/git/ref/heads/{branch}"), "GET", None)
+        .ok()
+        .and_then(|v| v["object"]["sha"].as_str().map(|s| s.to_string()));
+
+    let subj = diff::hide_footer(&knot.message).lines().next().unwrap_or("").to_string();
+    let msg = format!("knit {} {}", object::short_id(&head_knot), subj);
+
+    // GitHub refuses git-database writes on a repo with zero commits.
+    // Bootstrap with a single Contents-API commit carrying the yarnball.
+    if head_sha.is_none() {
+        let ball_bytes = fs::read(&y.path)?;
+        gh_api(&format!("repos/{gh_repo}/contents/.knit"), "PUT", Some(&serde_json::json!({
+            "message": msg,
+            "content": base64_encode(&ball_bytes),
+            "branch": branch,
+        })))?;
+        println!("sent {} -> github:{gh_repo} ({branch}, bootstrap)", object::short_id(&head_knot));
+        return Ok(());
+    }
+
+    // Collect (path -> mode, blob sha) for every file in HEAD, plus .knit.
+    let mut files: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for (path, e) in &tree {
+        let bytes = y.blob_bytes(&e.blob_id)?;
+        let sha = gh_blob(gh_repo, &bytes)?;
+        let mode = match e.mode {
+            worktree::MODE_EXE => "100755",
+            worktree::MODE_LINK => "120000",
+            _ => "100644",
+        };
+        files.insert(path.clone(), (mode.to_string(), sha));
+    }
+    let ball_bytes = fs::read(&y.path)?;
+    let ball_sha = gh_blob(gh_repo, &ball_bytes)?;
+    files.insert(".knit".to_string(), ("100644".to_string(), ball_sha));
+
+    let tree_sha = gh_tree(gh_repo, &files, "")?;
+
+    let parents: Vec<String> = vec![head_sha.clone().unwrap()];
+    let commit = gh_api(&format!("repos/{gh_repo}/git/commits"), "POST", Some(&serde_json::json!({
+        "message": msg,
+        "tree": tree_sha,
+        "parents": parents,
+    })))?;
+    let commit_sha = commit["sha"].as_str().context("commit response missing sha")?.to_string();
+
+    gh_api(&format!("repos/{gh_repo}/git/refs/heads/{branch}"), "PATCH", Some(&serde_json::json!({
+        "sha": commit_sha,
+    })))?;
+    println!("sent {} -> github:{gh_repo} ({branch} @ {})", object::short_id(&head_knot), &commit_sha[..7]);
+    Ok(())
+}
+
+/// Download `.knit` from a GitHub repo via the contents API.
+fn github_fetch(gh_repo: &str, tmp: &Path) -> Result<bool> {
+    let mut cmd = std::process::Command::new("gh");
+    cmd.arg("api")
+        .arg(format!("repos/{gh_repo}/contents/.knit"))
+        .arg("-H")
+        .arg("Accept: application/vnd.github.raw")
+        .stdout(fs::File::create(tmp)?);
+    let status = cmd.status().context("failed to run `gh`")?;
+    if !status.success() || fs::metadata(tmp).map(|m| m.len() == 0).unwrap_or(true) {
+        let _ = fs::remove_file(tmp);
+        return Ok(false);
+    }
+    Ok(true)
 }

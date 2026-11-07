@@ -36,9 +36,10 @@ knit gather <hub>             # pull new objects and strands
 knit haul <hub>               # gather, then join the remote head strand
 ```
 
-Hubs accept `file:///dir`, `/dir`, or `user@host[:dir]` (ssh, remote side runs
-`knits`, which stores yarnballs under `KNITS_DIR` or `~/.knits`). The remote
-repo name is the local directory name.
+Hubs accept `github.com/owner/repo` (or `gh:owner/repo`; pushed through `gh
+api` as blobs/trees/commits, never through git), `file:///dir`, `/dir`, or
+`user@host[:dir]` (ssh, remote side runs `knits`, which stores yarnballs under
+`KNITS_DIR` or `~/.knits`). The remote repo name is the local directory name.
 
 `.noyarn` files mark ignored paths (gitignore syntax). `~/.config/knit/ignore` is the global ignore.
 
