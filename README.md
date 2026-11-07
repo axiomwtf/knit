@@ -80,7 +80,7 @@ Hub urls: `github.com/owner/repo` (via `gh api`), `file:///dir`, `/dir`, or `use
 
 ## Format
 
-A `.knit` file is a 32-byte header followed by length-prefixed, CRC32-protected record frames. Readers tolerate a torn tail; writers hold `flock` on the file itself. Object records (`BLOB`/`TREE`/`KNOT`) are content-addressed with blake3; state records (`REF`/`HEAD`/`INDEX`/`MARK`/`STASH`/`HUB`/`JOIN`/`KEY`) are append-only logs where the latest wins. The full spec is in [`FORMAT.md`](./FORMAT.md).
+A `.knit` file is a 32-byte header followed by length-prefixed, CRC32-protected record frames. Readers tolerate a torn tail; writers hold `flock` on the file itself. Object records (`BLOB`/`TREE`/`KNOT`) are content-addressed with blake3; state records (`REF`/`HEAD`/`INDEX`/`MARK`/`STASH`/`HUB`/`JOIN`/`KEY`) are append-only logs where the latest wins. The full spec is in [`knitspec.md`](./knitspec.md).
 
 ## Building from source
 
@@ -94,7 +94,7 @@ The binaries are `target/release/knit` and `target/release/knits`.
 
 ## Spec
 
-The product specification is `knitspec.md` in the parent directory of this repo's source tree; the file format is [`FORMAT.md`](./FORMAT.md).
+The specification - product and `.knit` file format - is [`knitspec.md`](./knitspec.md).
 
 ## License
 

@@ -1,5 +1,5 @@
 //! Canonical object encodings and blake3 object IDs.
-//! See FORMAT.md for the byte layouts.
+//! See knitspec.md (appendix) for the byte layouts.
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
