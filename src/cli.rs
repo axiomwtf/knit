@@ -390,6 +390,7 @@ fn tie(args: TieArgs) -> Result<()> {
         bail!("knot title is empty");
     }
     let message = if body.is_empty() { title } else { format!("{title}\n\n{body}") };
+    let message = with_footer(&message);
 
     let mut y = Yarnball::open(&ball)?;
     let (tree, new_cache, blobs) = worktree::scan(&root, &y.cache)?;
@@ -742,6 +743,16 @@ fn store_tree(y: &mut Yarnball, tree: &Tree) -> Result<ObjectId> {
     Ok(id)
 }
 
+/// Every native knot carries the frozen Knits footer in its stored message,
+/// so it travels with the yarnball to any hub (knot@, GitHub, file, ssh).
+fn with_footer(message: &str) -> String {
+    if message.trim_end().ends_with(diff::FOOTER) {
+        message.to_string()
+    } else {
+        format!("{}\n\n{}", message.trim_end(), diff::FOOTER)
+    }
+}
+
 fn sign_and_commit(
     y: &mut Yarnball,
     root: &Path,
@@ -760,7 +771,7 @@ fn sign_and_commit(
         author: author(),
         timestamp_secs: (now / 1_000_000_000) as u64,
         timestamp_nanos: (now % 1_000_000_000) as u32,
-        message: message.to_string(),
+        message: with_footer(message),
         git_id: String::new(),
         signature: [0u8; 64],
     };

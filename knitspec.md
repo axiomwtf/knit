@@ -61,7 +61,7 @@ Fields:
 | parents | Parent knot IDs (more than one for joins) |
 | author | Author identity |
 | timestamp | Creation time |
-| message | Commit message, stored without the Knits footer |
+| message | Commit message with the Knits footer appended at knot creation |
 | signature | Ed25519 signature over the knot |
 | git_id | Original Git object ID, set only for imported commits |
 
@@ -112,29 +112,28 @@ Knits turns knit history into real Git objects and pushes them to GitHub over SS
 
 **Footer rule:**
 
-- Knits appends one fixed footer to the commit message of every **native** knot at export time.
-- Imported commits are exported byte for byte and never receive a footer.
-- If an imported commit already ends with the footer, it is recognized and never receives a second one.
+- Every **native** knot - any commit made using knit - carries one fixed footer in its stored message, appended when the knot is created. Because it lives in the message, it travels with the yarnball everywhere: `knot@` Knits hubs, GitHub export, file and ssh remotes.
+- Imported commits never receive a footer. If an imported commit already ends with the footer, it is recognized and never receives a second one.
 - If a native knot is pushed and later picked up again, it returns as an imported knot with the footer in its message and stays as is.
 - The footer is a frozen constant. Changing one byte later would change the Git ID of every native commit ever pushed.
-- `knit rows` may hide a trailing footer when displaying a message. This is display-only and does not change stored data.
+- `knit rows`, `knit pick` and friends hide a trailing footer when displaying a message. This is display-only and does not change stored data.
 
-**Footer constant:** the footer is frozen forever. Appended to the knot's stored message at export time, its exact bytes are a blank line, the trailer line below, and a trailing newline:
+**Footer constant:** the footer is frozen forever. Appended to the knot's stored message at creation, its exact bytes are a blank line, the trailer line below, and a trailing newline:
 
 ```
 Made-with: Knit (axiomwtf.github.io/knit)
 ```
 
-The trailer form follows `git interpret-trailers` convention and is machine-readable for `knit rows` hiding and import detection. This constant never changes.
+The trailer form follows `git interpret-trailers` convention and is machine-readable for display hiding and import detection. This constant never changes.
 
 **Signatures:**
 
-- The Ed25519 signature covers knit-native data. Knits adds the footer after the fact, so a Git signature over the exported bytes is impossible without Knits holding the user's private key.
+- The Ed25519 signature covers the stored message, footer included. A Git signature over the exported bytes is still impossible without Knits holding the user's private key.
 - Therefore no knit signature appears as GitHub "Verified." This is intended, not a defect.
 
 **Mapping:**
 
-- For native knots, the client can compute the Git commit ID locally: translate knit fields to Git's layout, append the fixed footer, and hash. Knits produces the same bytes, so the two always agree.
+- For native knots, the client can compute the Git commit ID locally: translate knit fields to Git's layout - the stored message already ends with the fixed footer - and hash. Knits produces the same bytes, so the two always agree.
 - For imported commits, the original Git ID is stored in `git_id` and must survive round trips exactly.
 - Git's awkward cases must be preserved on import and export: file modes, symlinks, submodules, merge commits, odd encodings, and tags.
 
@@ -431,7 +430,7 @@ repeat parent_count times:
 author        knit string    ("Name <email>")
 u64           timestamp_secs
 u32           timestamp_nanos
-knit string   message        (stored without any Knits footer)
+knit string   message        (native knots end with the Knits footer)
 knit string   git_id         (hex SHA-1, empty for native knots)
 64 bytes      signature      (Ed25519)
 ```
