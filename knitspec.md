@@ -1,18 +1,18 @@
-# Knit Version Control Specification
+# knit Version Control Specification
 **Version:** 0.1.0
-**Ownership:** Knit is owned by AXIOM ![Axiom Logo](https://axiomwtf.github.io/axiom.svg)
+**Ownership:** knit is owned by AXIOM ![Axiom Logo](./axiom.svg)
 **Status:** Specification draft.
 **License:** MPL-2.0
-**Last updated:** 2026-11-06
+**Last updated:** 2026-11-20
 ---
 
 ## 1. Overview
 
-Knit is a version control system and a from-scratch alternative to Git, written in Rust. It is not a wrapper and does not depend on Git anywhere in its implementation. Git is used only as an external test checker (`git fsck`) during development.
+knit is a version control system and a from-scratch alternative to Git, written in Rust. It is not a wrapper and does not depend on Git anywhere in its implementation. Git is used only as an external test checker (`git fsck`) during development.
 
 The whole repository lives in a single `.knit` file. There is no `.git`-style sidecar mess, in line with the Axiom "no sidecars" rule. There is no staging area: `knit tie` snapshots the working tree directly.
 
-Every knot is signed with Ed25519, matching the vfsx and Poly signing scheme.
+Every knot is signed with Ed25519, matching the vfsx and poly signing scheme.
 
 **Knits** is the bridge to the Git world. The client pushes over SSH and Knits turns knit history into a valid Git packfile and sends it to GitHub, with no `git push` involved. `knit pickup` and `knit fork` do the reverse.
 
@@ -20,9 +20,9 @@ Every knot is signed with Ed25519, matching the vfsx and Poly signing scheme.
 
 ## 2. Vocabulary
 
-Knit uses knitting-based names for its own concepts. Anything that touches the Git side, including the export format and Knits, must say "Git commit" explicitly so the two never blur.
+knit uses knitting-based names for its own concepts. Anything that touches the Git side, including the export format and Knits, must say "Git commit" explicitly so the two never blur.
 
-| Git term | Knit term |
+| Git term | knit term |
 |---|---|
 | repository | yarnball |
 | commit | knot |
@@ -75,7 +75,7 @@ Imported commits are stored exactly as they came from Git, with their original G
 
 ## 5. Immutability
 
-Knit history is immutable. There is no rewriting of history.
+knit history is immutable. There is no rewriting of history.
 
 Removed operations: amend, rebase, squash-in-place, `reset --hard` on history, and force push. A knot's ID and signature never change once tied. Strands can only move forward, so pushing is always a fast-forward.
 
@@ -178,7 +178,7 @@ Reference implementation status: TBD. A minimal `knits serve` daemon is planned 
 
 The CLI uses knitting vocabulary throughout. Commands deliberately absent: `add`, `reset`, `rebase`, `amend`, and anything else that rewrites knots.
 
-| Git equivalent | Knit command | Purpose |
+| Git equivalent | knit command | Purpose |
 |---|---|---|
 | `init` | `knit cast-on` | Create a new yarnball |
 | `commit` | `knit tie` | Snapshot the working tree as a new knot (`knit knot`, `knit save` aliases) |
