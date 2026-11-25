@@ -3,7 +3,7 @@ name = "knit"
 version = "0.1.0"
 edition = "2021"
 description = "Knit version control system - a from-scratch alternative to Git"
-license = "MPL-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 anyhow = "1.0"

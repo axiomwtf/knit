@@ -98,4 +98,4 @@ The specification - product and `.knit` file format - is [`knitspec.md`](./knits
 
 ## License
 
-MPL-2.0
+Apache-2.0

@@ -2,7 +2,7 @@
 **Version:** 0.1.0
 **Ownership:** knit is owned by AXIOM ![Axiom Logo](./axiom.svg)
 **Status:** Specification draft.
-**License:** MPL-2.0
+**License:** Apache-2.0
 **Last updated:** 2026-11-20
 ---
 
@@ -87,26 +87,7 @@ Consequences:
 - **Deleting strands:** hiding a strand from listings is allowed. The knots stay in the file.
 - **GitHub force pushes:** knit treats upstream divergence as separate strands and tells the user, never overwriting either side.
 
----
-
-## 6. Emergency Removal Hatch
-
-Immutability has exactly one exception: a narrow, human-run emergency hatch.
-
-Policy:
-
-- Removal is requested through a GitHub issue, with sensitive details handled over DM. The issue itself must carry no secrets.
-- Ownership must be verified before any purge, for example by a message signed by a key the repo already trusts or by control of the linked GitHub repository.
-- "Emergency" is defined narrowly: leaked credentials, illegal content, and valid legal orders. Typos, embarrassing messages, and changes of mind are refused. Rotating a leaked credential always comes first.
-- A purge rewrites the `.knit` file without the targeted bytes and replaces it atomically, and removes the data from the Knits copy.
-- Hashes and the knot chain stay, so signatures still verify. Missing content is marked with a signed tombstone recording the date and a reason code.
-- On the Git side, Knits cannot rebuild the original Git blob, so export uses a fixed placeholder and Git IDs change from that point on. This is a rewrite on the Git side only.
-- The hatch only reaches what it controls: the user's `.knit` file and the Knits copy. Other clones, laptops, and backups keep the data until their owners run the same purge. Docs must say "removed from the file," never "unrecoverable."
-- Who may request a purge (owner only, or also third parties such as copyright holders or courts) is TBD.
-
----
-
-## 7. Knits and Git Export
+## 6. Knits and Git Export
 
 Knits turns knit history into real Git objects and pushes them to GitHub over SSH. It does not invoke `git`.
 
@@ -147,7 +128,7 @@ The trailer form follows `git interpret-trailers` convention and is machine-read
 
 ---
 
-## 8. Knits Service Framework
+## 7. Knits Service Framework
 
 Knits is an open framework: any developer or team can run their own Knits hub for their repos, the same way anyone can host a Git server. Axiom runs a default hub at `knot@axiom.local`, but nothing in the protocol requires it.
 
@@ -174,7 +155,7 @@ Reference implementation status: TBD. A minimal `knits serve` daemon is planned 
 
 ---
 
-## 9. Commands
+## 8. Commands
 
 The CLI uses knitting vocabulary throughout. Commands deliberately absent: `add`, `reset`, `rebase`, `amend`, and anything else that rewrites knots.
 
@@ -232,7 +213,7 @@ This applies to `-yarn` and any other free-text argument. It does not apply to `
 
 ---
 
-## 10. Milestones
+## 9. Milestones
 
 1. **Spec:** this document, the file format, object model, and Git mapping.
 2. **Local core:** `cast-on`, `tie`, `count`, `rows`, `shear`, `pick`, and `strand`/`switch`.
@@ -246,21 +227,16 @@ Import comes before export on purpose: real repos then serve as the test. Pickup
 
 ---
 
-## 11. Open Questions
+## 10. Open Questions
 
 - File format: custom append-only vs embedded SQLite.
 - Strand fork vs GitHub fork command names (`knit pickup` is the clone command).
-- Purge mechanics: exact hashing coverage, placeholder format for Git export.
-- Who may request an emergency purge.
 - Knits exchange protocol details and reference implementation scope.
 - Whether conflicts are stored as first-class data in history or only shown in the working tree.
 - Large-file strategy: content-defined chunking details.
-- Strand fork vs GitHub fork command names (`knit fork` naming split; `knit pickup` is the clone command).
 
 ---
 
-
----
 
 ## Appendix: The .knit file format
 
@@ -329,7 +305,7 @@ no lock file.
 | 0x06 | `INDEX` | Working-tree stat cache (below). |
 | 0x07 | `MARK` | Named mark on a knot (below). Latest op per name wins. |
 | 0x08 | `STASH` | Stash entry (below). |
-| 0x09 | `TOMBSTONE` | Reserved: emergency-purge marker (future). |
+| 0x09 | `TOMBSTONE` | Reserved (future use). |
 | 0x0A | `KEY` | 32-byte Ed25519 public key. Appended the first time a key signs a knot; the set of KEY records is the yarnball's known signers. |
 | 0x0B | `JOIN` | Pending/resolved join state (below). Latest record wins. |
 | 0x0C | `HUB` | Knits remote (below). Empty url removes the remote. |
@@ -485,6 +461,5 @@ repeat change_count times, sorted by path:
     u32        mode
     obj id     blob_id
 ```
-
 
 *End of Specification*
